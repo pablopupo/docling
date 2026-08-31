@@ -17,6 +17,7 @@ import pytest
 from docling_core.types.doc import (
     DocItemLabel,
     ImageRefMode,
+    InlineGroup,
     PictureClassificationLabel,
     PictureItem,
     RichTableCell,
@@ -25,6 +26,7 @@ from docling_core.types.doc import (
     TextItem,
 )
 from PIL import Image
+from pydantic import AnyUrl
 
 from docling.backend.opendocument_backend import (
     OdpDocumentBackend,
@@ -47,6 +49,7 @@ from odfdo import (
     Frame,
     Header,
     LineBreak,
+    Link,
     List as OdfList,
     ListItem,
     Paragraph,
@@ -329,6 +332,331 @@ def test_odf_preserves_text_after_inline_children(
     ]
 
     assert text_items == ["Lead connective prose here bookmarked tail\nnext line"]
+
+
+def test_odt_preserves_hyperlink_target(tmp_path: Path):
+    path = tmp_path / "hyperlink.odt"
+    source = OdfDocument("text")
+    body = source.body
+    body.clear()
+
+    bold_style = Style("text", name="BoldLink")
+    bold_style.set_properties({"fo:font-weight": "bold"})
+    source.insert_style(bold_style)
+
+    paragraph = Paragraph("Watch ")
+    link = Link(url="https://example.com/talk")
+    link.append("the ")
+    link.append(Span("example", style="BoldLink"))
+    link.append(" talk")
+    paragraph.append(link)
+    paragraph.append(" for context.")
+    body.append(paragraph)
+    source.save(str(path))
+
+    result = DocumentConverter(allowed_formats=[InputFormat.ODT]).convert(path)
+    text_runs = [
+        (
+            item.text,
+            str(item.hyperlink) if item.hyperlink is not None else None,
+            item.formatting.bold if item.formatting is not None else False,
+        )
+        for item in result.document.texts
+    ]
+
+    assert text_runs == [
+        ("Watch", None, False),
+        ("the", "https://example.com/talk", False),
+        ("example", "https://example.com/talk", True),
+        ("talk", "https://example.com/talk", False),
+        ("for context.", None, False),
+    ]
+    assert isinstance(result.document.texts[1].hyperlink, AnyUrl)
+    assert result.document.export_to_markdown().strip() == (
+        "Watch [the](https://example.com/talk) "
+        "[**example**](https://example.com/talk) "
+        "[talk](https://example.com/talk) for context."
+    )
+    assert [
+        item["hyperlink"] for item in result.document.model_dump(mode="json")["texts"]
+    ] == [
+        None,
+        "https://example.com/talk",
+        "https://example.com/talk",
+        "https://example.com/talk",
+        None,
+    ]
+
+
+def test_odt_preserves_linked_list_item_target(tmp_path: Path):
+    path = tmp_path / "linked_list_item.odt"
+    source = OdfDocument("text")
+    body = source.body
+    body.clear()
+
+    paragraph = Paragraph()
+    paragraph.append(Link(url="list-target.odt#part", text="linked list item"))
+    list_item = ListItem()
+    list_item.append(paragraph)
+    odf_list = OdfList()
+    odf_list.append(list_item)
+    body.append(odf_list)
+    source.save(str(path))
+
+    result = DocumentConverter(allowed_formats=[InputFormat.ODT]).convert(path)
+    list_items = [
+        item for item in result.document.texts if item.label == DocItemLabel.LIST_ITEM
+    ]
+
+    assert [
+        (
+            item.text,
+            str(item.hyperlink) if item.hyperlink is not None else None,
+        )
+        for item in list_items
+    ] == [("linked list item", "list-target.odt#part")]
+    assert result.document.export_to_markdown().strip() == (
+        "- [linked list item](list-target.odt#part)"
+    )
+
+
+def test_odt_separates_list_item_paragraphs(tmp_path: Path):
+    path = tmp_path / "multi_paragraph_list_item.odt"
+    source = OdfDocument("text")
+    body = source.body
+    body.clear()
+
+    list_item = ListItem()
+    list_item.append(Paragraph("First paragraph"))
+    list_item.append(Paragraph("Second paragraph"))
+    odf_list = OdfList()
+    odf_list.append(list_item)
+    body.append(odf_list)
+    source.save(str(path))
+
+    result = DocumentConverter(allowed_formats=[InputFormat.ODT]).convert(path)
+    list_items = [
+        item for item in result.document.texts if item.label == DocItemLabel.LIST_ITEM
+    ]
+
+    assert [item.text for item in list_items] == ["First paragraph Second paragraph"]
+    assert result.document.export_to_markdown().strip() == (
+        "- First paragraph Second paragraph"
+    )
+
+
+def test_odt_separates_differently_formatted_list_item_paragraphs(tmp_path: Path):
+    path = tmp_path / "formatted_multi_paragraph_list_item.odt"
+    source = OdfDocument("text")
+    body = source.body
+    body.clear()
+
+    bold_style = Style("text", name="BoldListParagraph")
+    bold_style.set_properties({"fo:font-weight": "bold"})
+    source.insert_style(bold_style)
+
+    first_paragraph = Paragraph()
+    first_paragraph.append(Span("First paragraph", style="BoldListParagraph"))
+    list_item = ListItem()
+    list_item.append(first_paragraph)
+    list_item.append(Paragraph("Second paragraph"))
+    odf_list = OdfList()
+    odf_list.append(list_item)
+    body.append(odf_list)
+    source.save(str(path))
+
+    result = DocumentConverter(allowed_formats=[InputFormat.ODT]).convert(path)
+
+    assert result.document.export_to_markdown().strip() == (
+        "- **First paragraph** Second paragraph"
+    )
+
+
+def test_odt_preserves_mixed_linked_list_item(tmp_path: Path):
+    path = tmp_path / "mixed_linked_list_item.odt"
+    source = OdfDocument("text")
+    body = source.body
+    body.clear()
+
+    paragraph = Paragraph("Read ")
+    paragraph.append(Link(url="#details", text="details"))
+    paragraph.append(" now")
+    list_item = ListItem()
+    list_item.append(paragraph)
+    odf_list = OdfList()
+    odf_list.append(list_item)
+    body.append(odf_list)
+    source.save(str(path))
+
+    result = DocumentConverter(allowed_formats=[InputFormat.ODT]).convert(path)
+    list_items = [
+        item for item in result.document.texts if item.label == DocItemLabel.LIST_ITEM
+    ]
+
+    assert len(list_items) == 1
+    list_item = list_items[0]
+    assert list_item.text == ""
+    assert len(list_item.children) == 1
+    inline_group = list_item.children[0].resolve(result.document)
+    assert isinstance(inline_group, InlineGroup)
+    inline_items = [child.resolve(result.document) for child in inline_group.children]
+    assert [
+        (
+            item.text,
+            str(item.hyperlink) if item.hyperlink is not None else None,
+        )
+        for item in inline_items
+    ] == [("Read", None), ("details", "#details"), ("now", None)]
+    assert result.document.export_to_markdown().strip() == (
+        "- Read [details](#details) now"
+    )
+
+
+@pytest.mark.parametrize(
+    ("kind", "expected_label", "expected_level", "expected_markdown"),
+    [
+        ("heading", DocItemLabel.SECTION_HEADER, 2, "###"),
+        ("title", DocItemLabel.TITLE, None, "#"),
+        ("subtitle", DocItemLabel.SECTION_HEADER, 1, "##"),
+    ],
+)
+def test_odt_preserves_hyperlinks_in_block_text(
+    tmp_path: Path,
+    kind: str,
+    expected_label: DocItemLabel,
+    expected_level: int | None,
+    expected_markdown: str,
+):
+    path = tmp_path / f"linked_{kind}.odt"
+    source = OdfDocument("text")
+    body = source.body
+    body.clear()
+
+    if kind == "heading":
+        block = Header(2)
+    else:
+        block = Paragraph(style=kind.capitalize())
+    block.append("Read ")
+    block.append(Link(url="#details", text="details"))
+    block.append(" now")
+    body.append(block)
+    source.save(str(path))
+
+    result = DocumentConverter(allowed_formats=[InputFormat.ODT]).convert(path)
+    semantic_items = [
+        item for item in result.document.texts if item.label == expected_label
+    ]
+
+    assert len(semantic_items) == 1
+    semantic_item = semantic_items[0]
+    assert semantic_item.text == ""
+    if expected_level is not None:
+        assert getattr(semantic_item, "level") == expected_level
+    assert len(semantic_item.children) == 1
+    inline_group = semantic_item.children[0].resolve(result.document)
+    assert isinstance(inline_group, InlineGroup)
+    inline_items = [child.resolve(result.document) for child in inline_group.children]
+    assert [
+        (
+            item.label,
+            item.text,
+            item.orig,
+            str(item.hyperlink) if item.hyperlink is not None else None,
+        )
+        for item in inline_items
+    ] == [
+        (DocItemLabel.TEXT, "Read", "Read ", None),
+        (DocItemLabel.TEXT, "details", "details", "#details"),
+        (DocItemLabel.TEXT, "now", " now", None),
+    ]
+    assert result.document.export_to_markdown().strip() == (
+        f"{expected_markdown} Read [details](#details) now"
+    )
+
+
+def test_odt_image_reference_cleanup_preserves_hyperlink(tmp_path: Path):
+    image_path = tmp_path / "linked_image.png"
+    Image.new("RGB", (2, 2), "red").save(image_path)
+
+    path = tmp_path / "linked_image.odt"
+    source = OdfDocument("text")
+    body = source.body
+    body.clear()
+    image_ref = source.add_file(str(image_path))
+
+    paragraph = Paragraph()
+    paragraph.append(Link(url="https://example.com/docs", text="Docs"))
+    paragraph.append(f"({image_ref})")
+    paragraph.append(
+        Frame.image_frame(
+            image_ref,
+            size=("1cm", "1cm"),
+            anchor_type="as-char",
+        )
+    )
+    body.append(paragraph)
+    source.save(str(path))
+
+    result = DocumentConverter(allowed_formats=[InputFormat.ODT]).convert(path)
+    text_items = [
+        item for item in result.document.texts if item.label == DocItemLabel.TEXT
+    ]
+
+    assert len(result.document.pictures) == 1
+    assert result.document.pictures[0].image is not None
+    assert [
+        (
+            item.text,
+            str(item.hyperlink) if item.hyperlink is not None else None,
+        )
+        for item in text_items
+    ] == [("Docs", "https://example.com/docs")]
+    assert result.document.export_to_markdown().strip() == (
+        "<!-- image -->\n\n[Docs](https://example.com/docs)"
+    )
+
+
+@pytest.mark.parametrize(
+    ("href", "expected_hyperlink", "expected_markdown"),
+    [
+        ("   ", None, "linked text"),
+        ("http://[::1", None, "linked text"),
+        ("http://", None, "linked text"),
+        (
+            "guide.odt#part",
+            "guide.odt#part",
+            "[linked text](guide.odt#part)",
+        ),
+        ("#part", "#part", "[linked text](#part)"),
+    ],
+)
+def test_odt_classifies_hyperlink_targets(
+    tmp_path: Path,
+    href: str,
+    expected_hyperlink: str | None,
+    expected_markdown: str,
+):
+    path = tmp_path / "hyperlink_target.odt"
+    source = OdfDocument("text")
+    body = source.body
+    body.clear()
+
+    paragraph = Paragraph()
+    paragraph.append(Link(url=href, text="linked text"))
+    body.append(paragraph)
+    source.save(str(path))
+
+    result = DocumentConverter(allowed_formats=[InputFormat.ODT]).convert(path)
+
+    assert len(result.document.texts) == 1
+    text_item = result.document.texts[0]
+    assert text_item.text == "linked text"
+    assert (
+        str(text_item.hyperlink) if text_item.hyperlink is not None else None
+    ) == expected_hyperlink
+    if expected_hyperlink is not None:
+        assert isinstance(text_item.hyperlink, Path)
+    assert result.document.export_to_markdown().strip() == expected_markdown
 
 
 def test_ods_merged_cells(tmp_path: Path):
