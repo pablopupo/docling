@@ -201,6 +201,24 @@ def test_picture_description_embedded_images_keep_original_size() -> None:
     assert prepared.image.size == (20, 20)
 
 
+def test_picture_description_skips_picture_without_available_image() -> None:
+    model = _ConfiguredPictureDescriptionModel(_TestOptions())
+    doc = DoclingDocument(name="test")
+    picture = doc.add_picture(
+        prov=ProvenanceItem(
+            page_no=1,
+            bbox=BoundingBox(l=10, t=10, r=30, b=30),
+            charspan=(0, 0),
+        )
+    )
+
+    prepared = model.prepare_element(
+        conv_res=SimpleNamespace(document=doc, pages=[]), element=picture
+    )
+
+    assert prepared is None
+
+
 def test_picture_description_batch_size_must_be_positive() -> None:
     with pytest.raises(ValueError):
         _TestOptions(batch_size=0)
