@@ -4,10 +4,41 @@ from abc import ABC, abstractmethod
 from collections.abc import Iterable, Sequence
 from typing import Type
 
+from docling_core.types.doc import DocItemLabel
+
 from docling.datamodel.base_models import Page, TableStructurePrediction
 from docling.datamodel.document import ConversionResult
 from docling.datamodel.pipeline_options import BaseTableStructureOptions
 from docling.models.base_model import BaseModelWithOptions, BasePageModel
+
+# The three table backends share one policy for which layout regions to run table
+# structure on, and when to trust the result. Centralising it here keeps the
+# backends from drifting apart as that policy evolves.
+
+
+def table_candidate_labels(try_table_on_picture: bool) -> list[DocItemLabel]:
+    """Layout labels a table backend should attempt structure recognition on.
+
+    Regions the layout model already identified as tables are always processed.
+    With ``try_table_on_picture`` enabled, picture regions are processed too: the
+    layout model sometimes labels a table as a picture when its rows embed icons
+    or diagrams, which otherwise drops the whole table from the output (#3410).
+    """
+    labels = [DocItemLabel.TABLE, DocItemLabel.DOCUMENT_INDEX]
+    if try_table_on_picture:
+        labels.append(DocItemLabel.PICTURE)
+    return labels
+
+
+def is_table_like(num_rows: int, num_cols: int) -> bool:
+    """Whether a table-structure prediction is strong enough to keep.
+
+    Only used to gate picture regions promoted by ``try_table_on_picture``. A
+    genuine table has at least two rows and two columns, so smaller predictions
+    are treated as the model forcing structure onto a real image, and the region
+    is left as a picture instead.
+    """
+    return num_rows >= 2 and num_cols >= 2
 
 
 class BaseTableStructureModel(BasePageModel, BaseModelWithOptions, ABC):
